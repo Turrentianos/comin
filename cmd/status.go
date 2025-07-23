@@ -9,60 +9,16 @@ import (
 
 	"github.com/dustin/go-humanize"
 
-	"github.com/nlewo/comin/internal/deployment"
-	"github.com/nlewo/comin/internal/generation"
 	"github.com/nlewo/comin/internal/manager"
-	"github.com/nlewo/comin/internal/utils"
+	store "github.com/nlewo/comin/internal/store"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
 
-func generationStatus(g generation.Generation) {
-	fmt.Printf("  Current Generation\n")
-	switch g.Status {
-	case generation.Init:
-		fmt.Printf("    Status: initializated\n")
-	case generation.Evaluating:
-		fmt.Printf("    Status: evaluating (since %s)\n", humanize.Time(g.EvalStartedAt))
-	case generation.EvaluationSucceeded:
-		fmt.Printf("    Status: evaluated (%s)\n", humanize.Time(g.EvalEndedAt))
-	case generation.Building:
-		fmt.Printf("    Status: building (since %s)\n", humanize.Time(g.BuildStartedAt))
-	case generation.BuildSucceeded:
-		fmt.Printf("    Status: built (%s)\n", humanize.Time(g.BuildEndedAt))
-	}
-	printCommit(g.SelectedRemoteName, g.SelectedBranchName, g.SelectedCommitId, g.SelectedCommitMsg)
-}
-
-func deploymentStatus(d deployment.Deployment) {
-	fmt.Printf("  Current Deployment\n")
-	fmt.Printf("    Operation: %s\n", d.Operation)
-	switch d.Status {
-	case deployment.Init:
-		fmt.Printf("    Status: initializated\n")
-	case deployment.Running:
-		fmt.Printf("    Status: running (since %s)\n", humanize.Time(d.StartAt))
-	case deployment.Done:
-		fmt.Printf("    Status: succeeded (%s)\n", humanize.Time(d.EndAt))
-	case deployment.Failed:
-		fmt.Printf("    Status: failed (%s)\n", humanize.Time(d.EndAt))
-	}
-	printCommit(d.Generation.SelectedRemoteName, d.Generation.SelectedBranchName, d.Generation.SelectedCommitId, d.Generation.SelectedCommitMsg)
-}
-
-func printCommit(selectedRemoteName, selectedBranchName, selectedCommitId, selectedCommitMsg string) {
-	fmt.Printf("    Commit %s from '%s/%s'\n",
-		selectedCommitId,
-		selectedRemoteName,
-		selectedBranchName,
-	)
-	fmt.Printf("      %s\n",
-		utils.FormatCommitMsg(selectedCommitMsg),
-	)
-}
+var statusOneline bool
 
 func getStatus() (status manager.State, err error) {
-	url := "http://localhost:4242/status"
+	url := "http://localhost:4242/api/status"
 	client := http.Client{
 		Timeout: time.Second * 2,
 	}
@@ -75,7 +31,7 @@ func getStatus() (status manager.State, err error) {
 		return
 	}
 	if res.Body != nil {
-		defer res.Body.Close()
+		defer res.Body.Close() // nolint
 	}
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
@@ -88,6 +44,71 @@ func getStatus() (status manager.State, err error) {
 	return
 }
 
+func longStatus(status manager.State) {
+	fmt.Printf("Status of the machine %s\n", status.Builder.Hostname)
+	if status.NeedToReboot {
+		fmt.Printf("  Need to reboot: yes\n")
+	}
+	if status.IsSuspended {
+		fmt.Printf("  Is suspended: yes\n")
+	}
+	fmt.Printf("  Fetcher\n")
+	if status.Fetcher.RepositoryStatus.SelectedCommitShouldBeSigned {
+		if status.Fetcher.RepositoryStatus.SelectedCommitSigned {
+			fmt.Printf("    Commit %s signed by %s\n", status.Fetcher.RepositoryStatus.SelectedCommitId, status.Fetcher.RepositoryStatus.SelectedCommitSignedBy)
+		} else {
+			fmt.Printf("    Commit %s is not signed while it should be\n", status.Fetcher.RepositoryStatus.SelectedCommitId)
+		}
+	}
+	for _, r := range status.Fetcher.RepositoryStatus.Remotes {
+		fmt.Printf("    Remote %s %s fetched %s\n",
+			r.Name, r.Url, humanize.Time(r.FetchedAt),
+		)
+	}
+	fmt.Printf("  Builder\n")
+	if status.Builder.Generation != nil {
+		store.GenerationShow(*status.Builder.Generation)
+	} else {
+		fmt.Printf("    No build available\n")
+	}
+	status.Deployer.Show("    ")
+
+}
+
+func onelineStatus(status manager.State) {
+	if status.IsSuspended {
+		fmt.Printf(" ⏸️ ")
+	}
+	if status.Builder.Generation != nil && status.Builder.IsEvaluating {
+		fmt.Printf(" eval   %s/%s (%s)", status.Builder.Generation.SelectedRemoteName, status.Builder.Generation.SelectedBranchName,
+			humanize.Time(status.Builder.Generation.EvalStartedAt))
+	} else if status.Builder.Generation != nil && status.Builder.IsBuilding {
+		fmt.Printf(" build  %s/%s (%s)", status.Builder.Generation.SelectedRemoteName, status.Builder.Generation.SelectedBranchName,
+			humanize.Time(status.Builder.Generation.BuildStartedAt))
+	} else if status.Builder.Generation != nil && status.Builder.Generation.EvalStatus == store.EvalFailed {
+		fmt.Printf(" %s/%s (%s)", status.Builder.Generation.SelectedRemoteName, status.Builder.Generation.SelectedBranchName,
+			humanize.Time(status.Builder.Generation.EvalEndedAt))
+	} else if status.Builder.Generation != nil && status.Builder.Generation.BuildStatus == store.BuildFailed {
+		fmt.Printf(" %s/%s (%s)", status.Builder.Generation.SelectedRemoteName, status.Builder.Generation.SelectedBranchName,
+			humanize.Time(status.Builder.Generation.BuildEndedAt))
+	} else if status.Deployer.Deployment != nil {
+		switch status.Deployer.Deployment.Status {
+		case store.Running:
+			fmt.Printf(" deploy %s/%s (%s)", status.Deployer.Deployment.Generation.SelectedRemoteName, status.Deployer.Deployment.Generation.SelectedBranchName,
+				humanize.Time(status.Deployer.Deployment.EndedAt))
+		case store.Failed:
+			fmt.Printf(" %s/%s (%s)", status.Deployer.Deployment.Generation.SelectedRemoteName, status.Deployer.Deployment.Generation.SelectedBranchName,
+				humanize.Time(status.Deployer.Deployment.EndedAt))
+		case store.Done:
+			fmt.Printf(" %s/%s (%s)", status.Deployer.Deployment.Generation.SelectedRemoteName, status.Deployer.Deployment.Generation.SelectedBranchName,
+				humanize.Time(status.Deployer.Deployment.EndedAt))
+		}
+	}
+	if status.NeedToReboot {
+		fmt.Printf(" ")
+	}
+}
+
 var statusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Get the status of the local machine",
@@ -97,17 +118,15 @@ var statusCmd = &cobra.Command{
 		if err != nil {
 			logrus.Fatal(err)
 		}
-		fmt.Printf("Status of the machine %s\n", status.Hostname)
-		for _, r := range status.RepositoryStatus.Remotes {
-			fmt.Printf("  Remote %s fetched %s\n",
-				r.Url, humanize.Time(r.FetchedAt),
-			)
+		if statusOneline {
+			onelineStatus(status)
+		} else {
+			longStatus(status)
 		}
-		deploymentStatus(status.Deployment)
-		generationStatus(status.Generation)
 	},
 }
 
 func init() {
+	statusCmd.PersistentFlags().BoolVarP(&statusOneline, "oneline", "", false, "oneline")
 	rootCmd.AddCommand(statusCmd)
 }

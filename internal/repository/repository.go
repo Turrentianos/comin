@@ -1,12 +1,17 @@
 package repository
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"os"
+	"slices"
 	"time"
 
+	"github.com/ProtonMail/go-crypto/openpgp"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/nlewo/comin/internal/prometheus"
 	"github.com/nlewo/comin/internal/types"
 	"github.com/sirupsen/logrus"
 )
@@ -15,15 +20,36 @@ type repository struct {
 	Repository       *git.Repository
 	GitConfig        types.GitConfig
 	RepositoryStatus RepositoryStatus
+	prometheus       prometheus.Prometheus
+	gpgPubliKeys     []string
 }
 
 type Repository interface {
-	FetchAndUpdate(ctx context.Context, remoteName string) (rsCh chan RepositoryStatus)
+	FetchAndUpdate(ctx context.Context, remoteNames []string) (rsCh chan RepositoryStatus)
+	// GetRepositoryStatus is currently not thread safe and is only used to initialize the fetcher
+	GetRepositoryStatus() RepositoryStatus
 }
 
 // repositoryStatus is the last saved repositoryStatus
-func New(config types.GitConfig, repositoryStatus RepositoryStatus) (r *repository, err error) {
-	r = &repository{}
+func New(config types.GitConfig, mainCommitId string, prometheus prometheus.Prometheus) (r *repository, err error) {
+	gpgPublicKeys := make([]string, len(config.GpgPublicKeyPaths))
+	for i, path := range config.GpgPublicKeyPaths {
+		k, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open the GPG public key file %s: %w", path, err)
+		}
+		_, err = openpgp.ReadArmoredKeyRing(bytes.NewReader(k))
+		if err != nil {
+			return nil, fmt.Errorf("failed to read the GPG public key %s: %w", path, err)
+		}
+		gpgPublicKeys[i] = string(k)
+	}
+
+	r = &repository{
+		prometheus:   prometheus,
+		gpgPubliKeys: gpgPublicKeys,
+	}
+
 	r.GitConfig = config
 	r.Repository, err = repositoryOpen(config)
 	if err != nil {
@@ -33,56 +59,48 @@ func New(config types.GitConfig, repositoryStatus RepositoryStatus) (r *reposito
 	if err != nil {
 		return
 	}
-	r.RepositoryStatus = NewRepositoryStatus(config, repositoryStatus)
+	r.RepositoryStatus = NewRepositoryStatus(config, mainCommitId)
+
 	return
 }
 
-func (r *repository) FetchAndUpdate(ctx context.Context, remoteName string) (rsCh chan RepositoryStatus) {
+func (r *repository) GetRepositoryStatus() RepositoryStatus {
+	return r.RepositoryStatus
+}
+
+func (r *repository) FetchAndUpdate(ctx context.Context, remoteNames []string) (rsCh chan RepositoryStatus) {
 	rsCh = make(chan RepositoryStatus)
 	go func() {
 		// FIXME: switch to the FetchContext to clean resource up on timeout
-		err := r.Fetch(remoteName)
-		if err == nil {
-			r.Update()
-		}
+		r.Fetch(remoteNames)
+		_ = r.Update()
 		rsCh <- r.RepositoryStatus
 	}()
 	return rsCh
 }
 
-func (r *repository) Fetch(remoteName string) (err error) {
-	var found bool
+func (r *repository) Fetch(remoteNames []string) {
+	var err error
+	var status string
 	r.RepositoryStatus.Error = nil
 	r.RepositoryStatus.ErrorMsg = ""
-	if remoteName != "" {
-		for _, remote := range r.GitConfig.Remotes {
-			if remote.Name == remoteName {
-				found = true
-			}
-		}
-		if !found {
-			r.RepositoryStatus.Error = err
-			r.RepositoryStatus.ErrorMsg = err.Error()
-			return fmt.Errorf("The remote '%s' doesn't exist", remoteName)
-		}
-	}
-
+	logrus.Debugf("repository: fetching %s", remoteNames)
 	for _, remote := range r.GitConfig.Remotes {
 		repositoryStatusRemote := r.RepositoryStatus.GetRemote(remote.Name)
-		repositoryStatusRemote.LastFetched = false
-		if remoteName != "" && remote.Name != remoteName {
+		if !slices.Contains(remoteNames, remote.Name) {
 			continue
 		}
-		repositoryStatusRemote.LastFetched = true
 		if err = fetch(*r, remote); err != nil {
 			repositoryStatusRemote.FetchErrorMsg = err.Error()
+			status = "failed"
 		} else {
 			repositoryStatusRemote.FetchErrorMsg = ""
 			repositoryStatusRemote.Fetched = true
+			status = "succeeded"
 		}
-		repositoryStatusRemote.FetchedAt = time.Now()
+		repositoryStatusRemote.FetchedAt = time.Now().UTC()
+		r.prometheus.IncFetchCounter(remote.Name, status)
 	}
-	return
 }
 
 func (r *repository) Update() error {
@@ -186,6 +204,24 @@ func (r *repository) Update() error {
 		r.RepositoryStatus.Error = err
 		r.RepositoryStatus.ErrorMsg = err.Error()
 		return err
+	}
+
+	if len(r.gpgPubliKeys) > 0 {
+		r.RepositoryStatus.SelectedCommitShouldBeSigned = true
+		signedBy, err := headSignedBy(r.Repository, r.gpgPubliKeys)
+		if err != nil {
+			r.RepositoryStatus.Error = err
+			r.RepositoryStatus.ErrorMsg = err.Error()
+		}
+		if signedBy == nil {
+			r.RepositoryStatus.SelectedCommitSigned = false
+			r.RepositoryStatus.SelectedCommitSignedBy = ""
+		} else {
+			r.RepositoryStatus.SelectedCommitSigned = true
+			r.RepositoryStatus.SelectedCommitSignedBy = signedBy.PrimaryIdentity().Name
+		}
+	} else {
+		r.RepositoryStatus.SelectedCommitShouldBeSigned = false
 	}
 	return nil
 }

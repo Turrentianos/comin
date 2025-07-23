@@ -8,14 +8,25 @@
           Whether to run the comin service.
         '';
       };
+      package = lib.mkPackageOption pkgs "comin" { nullable = true; } // {
+        defaultText = "pkgs.comin or comin.packages.\${system}.default or null";
+      };
       hostname = mkOption {
         type = str;
         default = config.networking.hostName;
         description = ''
-          The name of the NixOS configuration to evaluate and
-          deploy. This value is used by comin to evaluate the
-          flake output
-          nixosConfigurations."<hostname>".config.system.build.toplevel
+          The name of the configuration to evaluate and deploy. 
+          This value is used by comin to evaluate the flake output
+          nixosConfigurations."<hostname>" or darwinConfigurations."<hostname>".
+          Defaults to networking.hostName - you MUST set either this option
+          or networking.hostName in your configuration.
+        '';
+      };
+      flakeSubdirectory = mkOption {
+        type = str;
+        default = ".";
+        description = ''
+          Subdirectory in the repository, containing flake.nix.
         '';
       };
       exporter = mkOption {
@@ -40,7 +51,7 @@
             openFirewall = mkOption {
               type = types.bool;
               default = false;
-              description = lib.mdDoc ''
+              description = ''
                 Open port in firewall for incoming connections to the Prometheus exporter.
               '';
             };
@@ -166,6 +177,23 @@
           machine (with different hardware for instance) without
           impacting both.
           Note it is only used by comin at evaluation.
+        '';
+      };
+      gpgPublicKeyPaths = mkOption {
+        description = "A list of GPG public key file paths. Each of this file should contains an armored GPG key.";
+        type = listOf str;
+        default = [];
+      };
+      postDeploymentCommand = mkOption {
+        description = "A path to a script executed after each
+        deployment. comin provides to the script the following
+        environment variables: `COMIN_GIT_SHA`, `COMIN_GIT_REF`,
+        `COMIN_GIT_MSG`, `COMIN_HOSTNAME`, `COMIN_FLAKE_URL`,
+        `COMIN_GENERATION`, `COMIN_STATUS` and `COMIN_ERROR_MSG`.";
+        type = nullOr path;
+        default = null;
+        example = lib.literalExpression ''
+          pkgs.writers.writeBash "post" "echo $COMIN_GIT_SHA";
         '';
       };
     };

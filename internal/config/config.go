@@ -1,11 +1,13 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
+
 	"github.com/nlewo/comin/internal/types"
 	"github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v2"
-	"os"
-	"path/filepath"
 )
 
 func Read(path string) (config types.Configuration, err error) {
@@ -13,7 +15,7 @@ func Read(path string) (config types.Configuration, err error) {
 	if err != nil {
 		return
 	}
-	defer file.Close()
+	defer file.Close() // nolint
 
 	d := yaml.NewDecoder(file)
 	if err := d.Decode(&config); err != nil {
@@ -25,7 +27,7 @@ func Read(path string) (config types.Configuration, err error) {
 			if err != nil {
 				return config, err
 			}
-			config.Remotes[i].Auth.AccessToken = string(content)
+			config.Remotes[i].Auth.AccessToken = strings.TrimSpace(string(content))
 		}
 		// On GitLab and GitHub, any non blank username is working
 		if remote.Auth.Username == "" {
@@ -51,13 +53,18 @@ func Read(path string) (config types.Configuration, err error) {
 	if config.StateFilepath == "" {
 		config.StateFilepath = filepath.Join(config.StateDir, "state.json")
 	}
+	if config.FlakeSubdirectory == "" {
+		config.FlakeSubdirectory = "."
+	}
 	logrus.Debugf("Config is '%#v'", config)
 	return
 }
 
 func MkGitConfig(config types.Configuration) types.GitConfig {
 	return types.GitConfig{
-		Path:    filepath.Join(config.StateDir, "repository"),
-		Remotes: config.Remotes,
+		Path:              filepath.Join(config.StateDir, "repository"),
+		Dir:               config.FlakeSubdirectory,
+		Remotes:           config.Remotes,
+		GpgPublicKeyPaths: config.GpgPublicKeyPaths,
 	}
 }

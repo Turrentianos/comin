@@ -16,6 +16,24 @@ boolean
 
 
 
+## services\.comin\.package
+
+
+
+The comin package to use\.
+
+
+
+*Type:*
+null or package
+
+
+
+*Default:*
+` "pkgs.comin or comin.packages.\${system}.default or null" `
+
+
+
 ## services\.comin\.debug
 
 Whether to run comin in debug mode\. Be careful, secrets are shown!\.
@@ -104,14 +122,51 @@ signed integer
 
 
 
+## services\.comin\.flakeSubdirectory
+
+
+
+Subdirectory in the repository, containing flake\.nix\.
+
+
+
+*Type:*
+string
+
+
+
+*Default:*
+` "." `
+
+
+
+## services\.comin\.gpgPublicKeyPaths
+
+
+
+A list of GPG public key file paths\. Each of this file should contains an armored GPG key\.
+
+
+
+*Type:*
+list of string
+
+
+
+*Default:*
+` [ ] `
+
+
+
 ## services\.comin\.hostname
 
 
 
-The name of the NixOS configuration to evaluate and
-deploy\. This value is used by comin to evaluate the
-flake output
-nixosConfigurations\.“\<hostname>”\.config\.system\.build\.toplevel
+The name of the configuration to evaluate and deploy\.
+This value is used by comin to evaluate the flake output
+nixosConfigurations\.“\<hostname>” or darwinConfigurations\.“\<hostname>”\.
+Defaults to networking\.hostName - you MUST set either this option
+or networking\.hostName in your configuration\.
 
 
 
@@ -148,6 +203,37 @@ null or string
 
 *Default:*
 ` null `
+
+
+
+## services\.comin\.postDeploymentCommand
+
+
+
+A path to a script executed after each
+deployment\. comin provides to the script the following
+environment variables: ` COMIN_GIT_SHA `, ` COMIN_GIT_REF `,
+` COMIN_GIT_MSG `, ` COMIN_HOSTNAME `, ` COMIN_FLAKE_URL `,
+` COMIN_GENERATION `, ` COMIN_STATUS ` and ` COMIN_ERROR_MSG `\.
+
+
+
+*Type:*
+null or absolute path
+
+
+
+*Default:*
+` null `
+
+
+
+*Example:*
+
+```
+pkgs.writers.writeBash "post" "echo $COMIN_GIT_SHA";
+
+```
 
 
 

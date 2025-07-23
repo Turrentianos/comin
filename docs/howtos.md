@@ -61,3 +61,19 @@ the `/etc/machine-id` file), comin won't deploy the configuration.
 So, to migrate to another machine, you have to update this
 option in the `testing-<hostname>` branch in order to only deploy this
 configuration to the new machine.
+
+## Check Git commit signatures
+
+The option `services.comin.gpgPublicKeyPaths` allows to declare a list
+of GPG public keys. If `services.comin.gpgPublicKeyPaths != []`, comin **only** evaluates commits signed
+by one of these GPG keys. Note only the last commit needs to be signed.
+
+The file containing a GPG public key has to be created with `gpg --armor  --export alice@cyb.org`.
+
+
+## How to deploy a nix-darwin configuration
+
+When comin is running on a Darwin system, it automatically builds and
+deploys a configuration found in the flake output
+`darwinConfigurations.hostname`. So, you only need to set this flake
+output and run comin on the target machine.

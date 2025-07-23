@@ -1,219 +1,186 @@
+// The manager is in charge of managing relationship between
+// components. Basically, it receives new commits from the fetcher,
+// call the builder to evaluate and build them. Finally, it submits
+// these builds to the deployer.
+
 package manager
 
 import (
-	"context"
 	"fmt"
+	"os"
 
-	"github.com/nlewo/comin/internal/deployment"
-	"github.com/nlewo/comin/internal/generation"
-	"github.com/nlewo/comin/internal/nix"
+	"github.com/nlewo/comin/internal/builder"
+	"github.com/nlewo/comin/internal/deployer"
+	"github.com/nlewo/comin/internal/executor"
+	"github.com/nlewo/comin/internal/fetcher"
+	"github.com/nlewo/comin/internal/profile"
 	"github.com/nlewo/comin/internal/prometheus"
-	"github.com/nlewo/comin/internal/repository"
-	"github.com/nlewo/comin/internal/utils"
+	"github.com/nlewo/comin/internal/scheduler"
+	"github.com/nlewo/comin/internal/store"
 	"github.com/sirupsen/logrus"
 )
 
 type State struct {
-	RepositoryStatus repository.RepositoryStatus `json:"repository_status"`
-	Generation       generation.Generation
-	IsFetching       bool                  `json:"is_fetching"`
-	IsRunning        bool                  `json:"is_running"`
-	Deployment       deployment.Deployment `json:"deployment"`
-	Hostname         string                `json:"hostname"`
+	NeedToReboot bool           `json:"need_to_reboot"`
+	IsSuspended  bool           `json:"suspended"`
+	Fetcher      fetcher.State  `json:"fetcher"`
+	Builder      builder.State  `json:"builder"`
+	Deployer     deployer.State `json:"deployer"`
+	Store        store.State    `json:"store"`
 }
 
 type Manager struct {
-	repository repository.Repository
-	// FIXME: a generation should get a repository URL from the repository status
-	repositoryPath string
-	hostname       string
-	// The machine id of the current host
-	machineId         string
-	triggerRepository chan string
-	generationFactory func(repository.RepositoryStatus, string, string) generation.Generation
-	stateRequestCh    chan struct{}
-	stateResultCh     chan State
-	repositoryStatus  repository.RepositoryStatus
-	// The generation currently managed
-	generation generation.Generation
-	isFetching bool
-	// FIXME: this is temporary in order to simplify the manager
-	// for a first iteration: this needs to be removed
-	isRunning               bool
-	needToBeRestarted       bool
-	cominServiceRestartFunc func() error
+	// The machine id of the current host. It is used to ensure
+	// the optionnal machine-id found at evaluation time
+	// corresponds to the machine-id of this host.
+	machineId string
 
-	evalFunc  generation.EvalFunc
-	buildFunc generation.BuildFunc
+	stateRequestCh chan struct{}
+	stateResultCh  chan State
 
-	deploymentResultCh chan deployment.DeploymentResult
-	// The deployment currenly managed
-	deployment   deployment.Deployment
-	deployerFunc deployment.DeployFunc
-
-	repositoryStatusCh  chan repository.RepositoryStatus
-	triggerDeploymentCh chan generation.Generation
+	needToReboot bool
 
 	prometheus prometheus.Prometheus
+	storage    *store.Store
+	scheduler  scheduler.Scheduler
+	Fetcher    *fetcher.Fetcher
+	Builder    *builder.Builder
+	deployer   *deployer.Deployer
+	executor   executor.Executor
+
+	isSuspended bool
 }
 
-func New(r repository.Repository, p prometheus.Prometheus, path, hostname, machineId string) Manager {
-	return Manager{
-		repository:              r,
-		repositoryPath:          path,
-		hostname:                hostname,
-		machineId:               machineId,
-		evalFunc:                nix.Eval,
-		buildFunc:               nix.Build,
-		deployerFunc:            nix.Deploy,
-		triggerRepository:       make(chan string),
-		stateRequestCh:          make(chan struct{}),
-		stateResultCh:           make(chan State),
-		cominServiceRestartFunc: utils.CominServiceRestart,
-		deploymentResultCh:      make(chan deployment.DeploymentResult),
-		repositoryStatusCh:      make(chan repository.RepositoryStatus),
-		triggerDeploymentCh:     make(chan generation.Generation, 1),
-		prometheus:              p,
+func New(s *store.Store, p prometheus.Prometheus, sched scheduler.Scheduler, fetcher *fetcher.Fetcher, builder *builder.Builder, deployer *deployer.Deployer, machineId string, executor executor.Executor) *Manager {
+	m := &Manager{
+		machineId:      machineId,
+		stateRequestCh: make(chan struct{}),
+		stateResultCh:  make(chan State),
+		prometheus:     p,
+		storage:        s,
+		scheduler:      sched,
+		Fetcher:        fetcher,
+		Builder:        builder,
+		deployer:       deployer,
+		executor:       executor,
 	}
+	return m
 }
 
-func (m Manager) GetState() State {
+func (m *Manager) GetState() State {
 	m.stateRequestCh <- struct{}{}
 	return <-m.stateResultCh
 }
 
-func (m Manager) Fetch(remote string) {
-	m.triggerRepository <- remote
-}
-
-func (m Manager) toState() State {
+func (m *Manager) toState() State {
 	return State{
-		Generation:       m.generation,
-		RepositoryStatus: m.repositoryStatus,
-		IsFetching:       m.isFetching,
-		IsRunning:        m.isRunning,
-		Deployment:       m.deployment,
-		Hostname:         m.hostname,
+		NeedToReboot: m.needToReboot,
+		IsSuspended:  m.isSuspended,
+		Fetcher:      m.Fetcher.GetState(),
+		Builder:      m.Builder.State(),
+		Deployer:     m.deployer.State(),
+		Store:        m.storage.GetState(),
 	}
 }
 
-func (m Manager) onEvaluated(ctx context.Context, evalResult generation.EvalResult) Manager {
-	m.generation = m.generation.UpdateEval(evalResult)
-	if evalResult.Err == nil {
-		m.generation = m.generation.Build(ctx)
-	} else {
-		m.isRunning = false
+func (m *Manager) Suspend() error {
+	if m.isSuspended {
+		return fmt.Errorf("the manager is already suspended")
 	}
-	return m
-}
-
-func (m Manager) onBuilt(ctx context.Context, buildResult generation.BuildResult) Manager {
-	m.generation = m.generation.UpdateBuild(buildResult)
-	if buildResult.Err == nil {
-		m.triggerDeployment(ctx, m.generation)
-	} else {
-		m.isRunning = false
+	if err := m.Builder.Suspend(); err != nil {
+		return err
 	}
-	return m
+	m.deployer.Suspend()
+	m.isSuspended = true
+	return nil
 }
 
-func (m Manager) triggerDeployment(ctx context.Context, g generation.Generation) {
-	m.triggerDeploymentCh <- g
-}
-
-func (m Manager) onTriggerDeployment(ctx context.Context, g generation.Generation) Manager {
-	m.deployment = deployment.New(g, m.deployerFunc, m.deploymentResultCh)
-	m.deployment = m.deployment.Deploy(ctx)
-	return m
-}
-
-func (m Manager) onDeployment(ctx context.Context, deploymentResult deployment.DeploymentResult) Manager {
-	logrus.Debugf("Deploy done with %#v", deploymentResult)
-	m.deployment = m.deployment.Update(deploymentResult)
-	// The comin service is not restart by the switch-to-configuration script in order to let comin terminating properly. Instead, comin restarts itself.
-	if m.deployment.RestartComin {
-		m.needToBeRestarted = true
+func (m *Manager) Resume() error {
+	if !m.isSuspended {
+		return fmt.Errorf("the manager is not suspended")
 	}
-	m.isRunning = false
-	m.prometheus.SetDeploymentInfo(m.deployment.Generation.SelectedCommitId, deployment.StatusToString(m.deployment.Status))
-	return m
+	if err := m.Builder.Resume(); err != nil {
+		return err
+	}
+	m.deployer.Resume()
+	m.isSuspended = false
+	return nil
 }
 
-func (m Manager) onRepositoryStatus(ctx context.Context, rs repository.RepositoryStatus) Manager {
-	logrus.Debugf("Fetch done with %#v", rs)
-	m.isFetching = false
-	m.repositoryStatus = rs
-
-	for _, r := range rs.Remotes {
-		if r.LastFetched {
-			status := "failed"
-			if r.FetchErrorMsg == "" {
-				status = "succeeded"
+// FetchAndBuild fetches new commits. If a new commit is available, it
+// evaluates and builds the derivation. Once built, it pushes the
+// generation on a channel which is consumed by the deployer.
+func (m *Manager) FetchAndBuild() {
+	go func() {
+		for {
+			select {
+			case rs := <-m.Fetcher.RepositoryStatusCh:
+				if !rs.SelectedCommitShouldBeSigned || rs.SelectedCommitSigned {
+					logrus.Infof("manager: a generation is evaluating for commit %s", rs.SelectedCommitId)
+					err := m.Builder.Eval(rs)
+					if err != nil {
+						logrus.Error(err)
+					}
+				} else {
+					logrus.Infof("manager: the commit %s is not evaluated because it is not signed", rs.SelectedCommitId)
+				}
+			case generationUUID := <-m.Builder.EvaluationDone:
+				generation, err := m.storage.GenerationGet(generationUUID)
+				if err != nil {
+					logrus.Error(err)
+					continue
+				}
+				if generation.EvalErr != nil {
+					continue
+				}
+				if generation.MachineId != "" && m.machineId != generation.MachineId {
+					logrus.Infof("manager: the comin.machineId %s is not the host machine-id %s", generation.MachineId, m.machineId)
+				} else {
+					logrus.Infof("manager: the build of the generation %s is submitted", generation.UUID.String())
+					m.Builder.SubmitBuild(generationUUID)
+				}
+			case generationUUID := <-m.Builder.BuildDone:
+				generation, err := m.storage.GenerationGet(generationUUID)
+				if err != nil {
+					logrus.Error(err)
+					continue
+				}
+				if generation.BuildErr == nil {
+					logrus.Infof("manager: a generation is available for deployment with commit %s", generation.SelectedCommitId)
+					m.deployer.Submit(generation)
+				}
 			}
-			m.prometheus.IncFetchCounter(r.Name, status)
 		}
-	}
 
-	if rs.SelectedCommitId == m.generation.SelectedCommitId && rs.SelectedBranchIsTesting == m.generation.SelectedBranchIsTesting {
-		logrus.Debugf("The repository status is the same than the previous one")
-		m.isRunning = false
-	} else {
-		// g.Stop(): this is required once we remove m.IsRunning
-		flakeUrl := fmt.Sprintf("git+file://%s?rev=%s", m.repositoryPath, m.repositoryStatus.SelectedCommitId)
-		m.generation = generation.New(rs, flakeUrl, m.hostname, m.machineId, m.evalFunc, m.buildFunc)
-		m.generation = m.generation.Eval(ctx)
-	}
-	return m
+	}()
 }
 
-func (m Manager) onTriggerRepository(ctx context.Context, remoteName string) Manager {
-	if m.isFetching {
-		logrus.Debugf("The manager is already fetching the repository")
-		return m
-	}
-	// FIXME: we will remove this in future versions
-	if m.isRunning {
-		logrus.Debugf("The manager is already running: it is currently not able to run tasks in parallel")
-		return m
-	}
-	logrus.Debugf("Trigger fetch and update remote %s", remoteName)
-	m.isRunning = true
-	m.isFetching = true
-	m.repositoryStatusCh = m.repository.FetchAndUpdate(ctx, remoteName)
-	return m
-}
+func (m *Manager) Run() {
+	logrus.Infof("manager: starting with machineId=%s", m.machineId)
+	m.needToReboot = m.executor.NeedToReboot()
+	m.prometheus.SetHostInfo(m.needToReboot)
 
-func (m Manager) Run() {
-	ctx := context.TODO()
+	m.FetchAndBuild()
+	m.deployer.Run()
 
-	logrus.Info("The manager is started")
-	logrus.Infof("  hostname = %s", m.hostname)
-	logrus.Infof("  machineId = %s", m.machineId)
-	logrus.Infof("  repositoryPath = %s", m.repositoryPath)
 	for {
 		select {
 		case <-m.stateRequestCh:
 			m.stateResultCh <- m.toState()
-		case remoteName := <-m.triggerRepository:
-			m = m.onTriggerRepository(ctx, remoteName)
-		case rs := <-m.repositoryStatusCh:
-			m = m.onRepositoryStatus(ctx, rs)
-		case evalResult := <-m.generation.EvalCh():
-			m = m.onEvaluated(ctx, evalResult)
-		case buildResult := <-m.generation.BuildCh():
-			m = m.onBuilt(ctx, buildResult)
-		case generation := <-m.triggerDeploymentCh:
-			m = m.onTriggerDeployment(ctx, generation)
-		case deploymentResult := <-m.deploymentResultCh:
-			m = m.onDeployment(ctx, deploymentResult)
-		}
-		if m.needToBeRestarted {
-			// TODO: stop contexts
-			if err := m.cominServiceRestartFunc(); err != nil {
-				logrus.Fatal(err)
-				return
+		case dpl := <-m.deployer.DeploymentDoneCh:
+			m.prometheus.SetDeploymentInfo(dpl.Generation.SelectedCommitId, store.StatusToString(dpl.Status))
+			getsEvicted, evicted := m.storage.DeploymentInsertAndCommit(dpl)
+			if getsEvicted && evicted.ProfilePath != "" {
+				_ = profile.RemoveProfilePath(evicted.ProfilePath)
 			}
-			m.needToBeRestarted = false
+			m.needToReboot = m.executor.NeedToReboot()
+			m.prometheus.SetHostInfo(m.needToReboot)
+			if dpl.RestartComin {
+				// TODO: stop contexts
+				logrus.Infof("manager: comin needs to be restarted")
+				logrus.Infof("manager: exiting comin to let the service manager restart it")
+				os.Exit(0)
+			}
 		}
 	}
 }
