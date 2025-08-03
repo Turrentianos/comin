@@ -1,11 +1,12 @@
 package types
 
 type Remote struct {
-	Name     string
-	URL      string
-	Auth     Auth
-	Branches Branches `yaml:"branches"`
-	Timeout  int      `yaml:"timeout"`
+	Name        string
+	URL         string
+	Auth        Auth
+	Branches    Branches `yaml:"branches"`
+	ModuleNames []string
+	Timeout     int `yaml:"timeout"`
 	// The period to poll the remote in second
 	Poller Poller `yaml:"poller"`
 }

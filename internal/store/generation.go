@@ -65,16 +65,18 @@ type Generation struct {
 	FlakeUrl string    `json:"flake-url"`
 	Hostname string    `json:"hostname"`
 
-	SelectedRemoteUrl       string `json:"remote-url"`
-	SelectedRemoteName      string `json:"remote-name"`
-	SelectedBranchName      string `json:"branch-name"`
-	SelectedCommitId        string `json:"commit-id"`
-	SelectedCommitMsg       string `json:"commit-msg"`
-	SelectedBranchIsTesting bool   `json:"branch-is-testing"`
+	SelectedRemoteUrl          string   `json:"remote-url"`
+	SelectedRemoteName         string   `json:"remote-name"`
+	SelectedBranchName         string   `json:"branch-name"`
+	SelectedCommitId           string   `json:"commit-id"`
+	SelectedCommitMsg          string   `json:"commit-msg"`
+	SelectedSubModulesCommitId []string `json:"sub-modules-commit-id"`
+	SelectedBranchIsTesting    bool     `json:"branch-is-testing"`
 
-	MainCommitId   string `json:"main-commit-id"`
-	MainRemoteName string `json:"main-remote-name"`
-	MainBranchName string `json:"main-branch-name"`
+	MainCommitId           string   `json:"main-commit-id"`
+	MainSubModulesCommitId []string `json:"main-sub-modules-commit-id"`
+	MainRemoteName         string   `json:"main-remote-name"`
+	MainBranchName         string   `json:"main-branch-name"`
 
 	EvalStatus    EvalStatus `json:"eval-status"`
 	EvalStartedAt time.Time  `json:"eval-started-at"`
@@ -95,19 +97,21 @@ type Generation struct {
 
 func (s *Store) NewGeneration(hostname, repositoryPath, repositoryDir string, rs repository.RepositoryStatus) (g Generation) {
 	g = Generation{
-		UUID:                    uuid.New(),
-		FlakeUrl:                fmt.Sprintf("git+file://%s?dir=%s&rev=%s", repositoryPath, repositoryDir, rs.SelectedCommitId),
-		Hostname:                hostname,
-		SelectedRemoteName:      rs.SelectedRemoteName,
-		SelectedBranchName:      rs.SelectedBranchName,
-		SelectedCommitId:        rs.SelectedCommitId,
-		SelectedCommitMsg:       rs.SelectedCommitMsg,
-		SelectedBranchIsTesting: rs.SelectedBranchIsTesting,
-		MainRemoteName:          rs.MainBranchName,
-		MainBranchName:          rs.MainBranchName,
-		MainCommitId:            rs.MainCommitId,
-		EvalStatus:              EvalInit,
-		BuildStatus:             BuildInit,
+		UUID:                       uuid.New(),
+		FlakeUrl:                   fmt.Sprintf("git+file://%s?dir=%s&rev=%s", repositoryPath, repositoryDir, rs.SelectedCommitId),
+		Hostname:                   hostname,
+		SelectedRemoteName:         rs.SelectedRemoteName,
+		SelectedBranchName:         rs.SelectedBranchName,
+		SelectedCommitId:           rs.SelectedCommitId,
+		SelectedSubModulesCommitId: rs.SelectedSubModulesCommitId,
+		SelectedCommitMsg:          rs.SelectedCommitMsg,
+		SelectedBranchIsTesting:    rs.SelectedBranchIsTesting,
+		MainRemoteName:             rs.MainBranchName,
+		MainBranchName:             rs.MainBranchName,
+		MainCommitId:               rs.MainCommitId,
+		MainSubModulesCommitId:     rs.MainSubModulesCommitId,
+		EvalStatus:                 EvalInit,
+		BuildStatus:                BuildInit,
 	}
 	s.Generations = append(s.Generations, &g)
 	return

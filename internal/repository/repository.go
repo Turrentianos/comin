@@ -105,6 +105,7 @@ func (r *repository) Fetch(remoteNames []string) {
 
 func (r *repository) Update() error {
 	selectedCommitId := ""
+	var selectedSubModulesCommitId []string
 
 	// We first walk on all Main branches in order to get a commit
 	// from a Main branch. Once found, we could then walk on all
@@ -132,7 +133,10 @@ func (r *repository) Update() error {
 			remote.Main.ErrorMsg = ""
 		}
 
+		subModulesCommitId := getSubModulesCommitId(r, remote.SubModulesNames)
+
 		remote.Main.CommitId = head.String()
+		remote.Main.SubModulesCommitId = subModulesCommitId
 		remote.Main.CommitMsg = msg
 		remote.Main.OnTopOf = r.RepositoryStatus.MainCommitId
 
@@ -142,14 +146,28 @@ func (r *repository) Update() error {
 			r.RepositoryStatus.SelectedBranchName = remote.Main.Name
 			r.RepositoryStatus.SelectedRemoteName = remote.Name
 			r.RepositoryStatus.SelectedBranchIsTesting = false
+			if len(selectedSubModulesCommitId) == 0 {
+				selectedSubModulesCommitId = subModulesCommitId
+			}
 		}
-		if head.String() != r.RepositoryStatus.MainCommitId {
+
+		subModulesDiff := false
+		for i, hash := range subModulesCommitId {
+			if r.RepositoryStatus.MainSubModulesCommitId[i] != hash {
+				subModulesDiff = true
+				break
+			}
+		}
+
+		if head.String() != r.RepositoryStatus.MainCommitId || subModulesDiff {
 			selectedCommitId = head.String()
+			r.RepositoryStatus.SelectedSubModulesCommitId = subModulesCommitId
 			r.RepositoryStatus.SelectedCommitMsg = msg
 			r.RepositoryStatus.SelectedBranchName = remote.Main.Name
 			r.RepositoryStatus.SelectedBranchIsTesting = false
 			r.RepositoryStatus.SelectedRemoteName = remote.Name
 			r.RepositoryStatus.MainCommitId = head.String()
+			r.RepositoryStatus.MainSubModulesCommitId = subModulesCommitId
 			r.RepositoryStatus.MainBranchName = remote.Main.Name
 			r.RepositoryStatus.MainRemoteName = remote.Name
 			break
@@ -198,6 +216,7 @@ func (r *repository) Update() error {
 
 	if selectedCommitId != "" {
 		r.RepositoryStatus.SelectedCommitId = selectedCommitId
+		r.RepositoryStatus.SelectedSubModulesCommitId = selectedSubModulesCommitId
 	}
 
 	if err := hardReset(*r, plumbing.NewHash(selectedCommitId)); err != nil {

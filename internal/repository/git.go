@@ -17,8 +17,9 @@ import (
 
 func RepositoryClone(directory, url, commitId, accessToken string) error {
 	options := &git.CloneOptions{
-		URL:        url,
-		NoCheckout: true,
+		URL:               url,
+		NoCheckout:        true,
+		RecurseSubmodules: git.DefaultSubmoduleRecursionDepth,
 	}
 	if accessToken != "" {
 		options.Auth = &http.BasicAuth{
@@ -30,6 +31,7 @@ func RepositoryClone(directory, url, commitId, accessToken string) error {
 	if err != nil {
 		return err
 	}
+
 	worktree, err := repository.Worktree()
 	if err != nil {
 		return err
@@ -40,12 +42,30 @@ func RepositoryClone(directory, url, commitId, accessToken string) error {
 	if err != nil {
 		return fmt.Errorf("cannot checkout the commit ID %s: '%s'", commitId, err)
 	}
+
+	err = worktree.Pull(&git.PullOptions{
+		Auth:              options.Auth,
+		RecurseSubmodules: git.DefaultSubmoduleRecursionDepth,
+	})
+	if err != nil {
+		return err
+	}
+	// Alternative to update only one submodule
+	// sub, err := worktree.Submodule("oa-llionakis")
+	// if err != nil {
+	// 	return err
+	// }
+	// sub.Update(&git.SubmoduleUpdateOptions{
+	// 	Init: true,
+	// 	NoFetch: false,
+	// 	Auth: options.Auth,
+	// })
 	return nil
 }
 
-func getRemoteCommitHash(r repository, remote, branch string) *plumbing.Hash {
+func getRepositoryCommitHash(r *git.Repository, remote, branch string) *plumbing.Hash {
 	remoteBranch := fmt.Sprintf("refs/remotes/%s/%s", remote, branch)
-	remoteHeadRef, err := r.Repository.Reference(
+	remoteHeadRef, err := r.Reference(
 		plumbing.ReferenceName(remoteBranch),
 		true)
 	if err != nil {
@@ -56,6 +76,10 @@ func getRemoteCommitHash(r repository, remote, branch string) *plumbing.Hash {
 	}
 	commitId := remoteHeadRef.Hash()
 	return &commitId
+}
+
+func getRemoteCommitHash(r repository, remote, branch string) *plumbing.Hash {
+	return getRepositoryCommitHash(r.Repository, remote, branch)
 }
 
 func hasNotBeenHardReset(r repository, branchName string, currentMainHash *plumbing.Hash, remoteMainHead *plumbing.Hash) error {
@@ -94,6 +118,28 @@ func getHeadFromRemoteAndBranch(r repository, remoteName, branchName, currentMai
 	}
 
 	return *head, commitObject.Message, nil
+}
+
+func getSubModulesCommitId(r *repository, subModulesNames []string) []string {
+	wt, err := r.Repository.Worktree()
+	if err != nil {
+		return nil
+	}
+	var subModuleHashes []string
+	for _, subModuleName := range subModulesNames {
+		subModule, err := wt.Submodule(subModuleName)
+		if err != nil {
+			continue
+		}
+		subModuleRepo, err := subModule.Repository()
+		if err != nil {
+			continue
+		}
+
+		hash := getRepositoryCommitHash(subModuleRepo, "main", "main")
+		subModuleHashes = append(subModuleHashes, hash.String())
+	}
+	return subModuleHashes
 }
 
 func hardReset(r repository, newHead plumbing.Hash) error {
