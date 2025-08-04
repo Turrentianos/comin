@@ -68,6 +68,12 @@
                 The name of the remote.
               '';
             };
+            subModuleNames = mkOption {
+              type = listOf str;
+              description = ''
+                The submodules names used to sync the configuration.
+              '';
+            };
             url = mkOption {
               type = str;
               description = ''
