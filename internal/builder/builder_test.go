@@ -14,42 +14,58 @@ import (
 	_ "net/http/pprof"
 )
 
-var mkNixEvalMock = func(evalDone chan struct{}) EvalFunc {
-	return func(ctx context.Context, repositoryPath string, hostname string) (string, string, string, error) {
-		select {
-		case <-ctx.Done():
-			return "", "", "", ctx.Err()
-		case <-evalDone:
-			return "drv-path", "out-path", "", nil
-		}
-	}
+type ExecutorMock struct {
+	evalDone     chan struct{}
+	buildDone    chan struct{}
+	alreadyBuilt bool
 }
 
-var mkNixBuildMock = func(buildDone chan struct{}) BuildFunc {
-	return func(ctx context.Context, drvPath string) error {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-buildDone:
-			return nil
-		}
+func (n ExecutorMock) ReadMachineId() (string, error) {
+	return "", nil
+}
+func (n ExecutorMock) NeedToReboot() bool {
+	return false
+}
+func (n ExecutorMock) IsStorePathExist(storePath string) bool {
+	return n.alreadyBuilt
+}
+func (n ExecutorMock) Deploy(ctx context.Context, outPath, operation string) (needToRestartComin bool, profilePath string, err error) {
+	return false, "", nil
+}
+func (n ExecutorMock) Eval(ctx context.Context, flakeUrl, hostname string) (drvPath string, outPath string, machineId string, err error) {
+	select {
+	case <-ctx.Done():
+		return "", "", "", ctx.Err()
+	case <-n.evalDone:
+		return "drv-path", "out-path", "", nil
 	}
 }
-
-var nixBuildMockNil = func(ctx context.Context, drvPath string) error { return nil }
+func (n ExecutorMock) Build(ctx context.Context, drvPath string) (err error) {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-n.buildDone:
+		return nil
+	}
+}
+func NewExecutorMock(alreadyBuilt bool) ExecutorMock {
+	return ExecutorMock{
+		evalDone:     make(chan struct{}),
+		buildDone:    make(chan struct{}),
+		alreadyBuilt: alreadyBuilt,
+	}
+}
 
 func TestBuilderBuild(t *testing.T) {
 	go func() {
 		log.Println(http.ListenAndServe("localhost:6060", nil))
 	}()
 
-	evalDone := make(chan struct{})
-	buildDone := make(chan struct{})
-
 	tmp := t.TempDir()
 	s, err := store.New(tmp+"/state.json", tmp+"/gcroots", 1, 1)
 	assert.Nil(t, err)
-	b := New(s, "", "", "my-machine", 2*time.Second, mkNixEvalMock(evalDone), 2*time.Second, mkNixBuildMock(buildDone))
+	eMock := NewExecutorMock(false)
+	b := New(s, eMock, "", "", "my-machine", 2*time.Second, 2*time.Second)
 
 	// Run the evaluator
 	_ = b.Eval(repository.RepositoryStatus{})
@@ -58,18 +74,18 @@ func TestBuilderBuild(t *testing.T) {
 
 	_ = b.Eval(repository.RepositoryStatus{})
 	assert.EventuallyWithT(t, func(c *assert.CollectT) {
-		assert.True(c, b.IsEvaluating)
+		assert.True(c, b.isEvaluating.Load())
 	}, 2*time.Second, 100*time.Millisecond)
-	evalDone <- struct{}{}
+	eMock.evalDone <- struct{}{}
 	assert.EventuallyWithT(t, func(c *assert.CollectT) {
-		assert.False(c, b.IsEvaluating)
+		assert.False(c, b.isEvaluating.Load())
 	}, 2*time.Second, 100*time.Millisecond)
 	gUUID = <-b.EvaluationDone
 
 	err = b.build(gUUID)
 	assert.Nil(t, err)
 	assert.EventuallyWithT(t, func(c *assert.CollectT) {
-		assert.True(c, b.IsBuilding)
+		assert.True(c, b.isBuilding.Load())
 	}, 2*time.Second, 100*time.Millisecond)
 	err = b.build(gUUID)
 	assert.ErrorContains(t, err, "the builder is already building")
@@ -78,7 +94,7 @@ func TestBuilderBuild(t *testing.T) {
 	b.Stop()
 	gUUID = <-b.BuildDone
 	assert.EventuallyWithT(t, func(c *assert.CollectT) {
-		assert.False(c, b.IsBuilding)
+		assert.False(c, b.isBuilding.Load())
 		g, _ := b.store.GenerationGet(gUUID)
 		assert.ErrorContains(c, g.BuildErr, "context canceled")
 	}, 2*time.Second, 100*time.Millisecond)
@@ -94,9 +110,9 @@ func TestBuilderBuild(t *testing.T) {
 	// The builder succeeds
 	err = b.build(gUUID)
 	assert.Nil(t, err)
-	buildDone <- struct{}{}
+	eMock.buildDone <- struct{}{}
 	assert.EventuallyWithT(t, func(c *assert.CollectT) {
-		assert.False(c, b.IsBuilding)
+		assert.False(c, b.isBuilding.Load())
 	}, 3*time.Second, 100*time.Millisecond)
 
 	// The generation is already built
@@ -105,18 +121,18 @@ func TestBuilderBuild(t *testing.T) {
 }
 
 func TestEval(t *testing.T) {
-	evalDone := make(chan struct{})
 	tmp := t.TempDir()
 	s, err := store.New(tmp+"/state.json", tmp+"/gcroots", 1, 1)
 	assert.Nil(t, err)
-	b := New(s, "", "", "", 5*time.Second, mkNixEvalMock(evalDone), 5*time.Second, nixBuildMockNil)
+	eMock := NewExecutorMock(false)
+	b := New(s, eMock, "", "", "", 5*time.Second, 5*time.Second)
 	_ = b.Eval(repository.RepositoryStatus{})
-	assert.True(t, b.IsEvaluating)
+	assert.True(t, b.isEvaluating.Load())
 
-	evalDone <- struct{}{}
+	eMock.evalDone <- struct{}{}
 	gUUID := <-b.EvaluationDone
 	assert.EventuallyWithT(t, func(c *assert.CollectT) {
-		assert.False(c, b.IsEvaluating)
+		assert.False(c, b.isEvaluating.Load())
 		g, _ := b.store.GenerationGet(gUUID)
 		assert.Equal(c, store.Evaluated, g.EvalStatus)
 		assert.Equal(c, "drv-path", g.DrvPath)
@@ -124,21 +140,43 @@ func TestEval(t *testing.T) {
 	}, 2*time.Second, 100*time.Millisecond)
 }
 
-func TestBuilderPreemption(t *testing.T) {
-	evalDone := make(chan struct{})
+// TestEvalAlreadyBuilt tests the evaluation when the storepath has been already built.
+func TestEvalAlreadyBuilt(t *testing.T) {
 	tmp := t.TempDir()
 	s, err := store.New(tmp+"/state.json", tmp+"/gcroots", 1, 1)
 	assert.Nil(t, err)
-	b := New(s, "", "", "", 5*time.Second, mkNixEvalMock(evalDone), 5*time.Second, nixBuildMockNil)
+	eMock := NewExecutorMock(true)
+	b := New(s, eMock, "", "", "", 5*time.Second, 5*time.Second)
+	_ = b.Eval(repository.RepositoryStatus{})
+	assert.True(t, b.IsEvaluating())
+
+	eMock.evalDone <- struct{}{}
+	gUUID := <-b.BuildDone
+	assert.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.False(c, b.IsEvaluating())
+		g, _ := b.store.GenerationGet(gUUID)
+		assert.Equal(c, store.Evaluated, g.EvalStatus)
+		assert.Equal(c, "drv-path", g.DrvPath)
+		assert.Equal(c, "out-path", g.OutPath)
+		assert.Equal(c, store.Built, g.BuildStatus)
+	}, 2*time.Second, 100*time.Millisecond)
+}
+
+func TestBuilderPreemption(t *testing.T) {
+	tmp := t.TempDir()
+	s, err := store.New(tmp+"/state.json", tmp+"/gcroots", 1, 1)
+	assert.Nil(t, err)
+	eMock := NewExecutorMock(false)
+	b := New(s, eMock, "", "", "", 5*time.Second, 5*time.Second)
 	_ = b.Eval(repository.RepositoryStatus{SelectedCommitId: "commit-1"})
-	assert.True(t, b.IsEvaluating)
+	assert.True(t, b.isEvaluating.Load())
 	assert.EventuallyWithT(t, func(c *assert.CollectT) {
 		g, _ := b.store.GenerationGet(*b.GenerationUUID)
 		assert.Equal(c, "commit-1", g.SelectedCommitId)
 	}, 2*time.Second, 100*time.Millisecond)
 
 	_ = b.Eval(repository.RepositoryStatus{SelectedCommitId: "commit-2"})
-	assert.True(t, b.IsEvaluating)
+	assert.True(t, b.isEvaluating.Load())
 
 	assert.EventuallyWithT(t, func(c *assert.CollectT) {
 		g, _ := b.store.GenerationGet(*b.GenerationUUID)
@@ -147,13 +185,13 @@ func TestBuilderPreemption(t *testing.T) {
 }
 
 func TestBuilderStop(t *testing.T) {
-	evalDone := make(chan struct{})
 	tmp := t.TempDir()
 	s, err := store.New(tmp+"/state.json", tmp+"/gcroots", 1, 1)
 	assert.Nil(t, err)
-	b := New(s, "", "", "", 5*time.Second, mkNixEvalMock(evalDone), 5*time.Second, nixBuildMockNil)
+	eMock := NewExecutorMock(false)
+	b := New(s, eMock, "", "", "", 5*time.Second, 5*time.Second)
 	_ = b.Eval(repository.RepositoryStatus{})
-	assert.True(t, b.IsEvaluating)
+	assert.True(t, b.isEvaluating.Load())
 	b.Stop()
 	assert.EventuallyWithT(t, func(c *assert.CollectT) {
 		g, _ := b.store.GenerationGet(*b.GenerationUUID)
@@ -162,13 +200,13 @@ func TestBuilderStop(t *testing.T) {
 }
 
 func TestBuilderTimeout(t *testing.T) {
-	evalDone := make(chan struct{})
 	tmp := t.TempDir()
 	s, err := store.New(tmp+"/state.json", tmp+"/gcroots", 1, 1)
 	assert.Nil(t, err)
-	b := New(s, "", "", "", 1*time.Second, mkNixEvalMock(evalDone), 5*time.Second, nixBuildMockNil)
+	eMock := NewExecutorMock(false)
+	b := New(s, eMock, "", "", "", 1*time.Second, 5*time.Second)
 	_ = b.Eval(repository.RepositoryStatus{})
-	assert.True(t, b.IsEvaluating)
+	assert.True(t, b.isEvaluating.Load())
 	assert.EventuallyWithT(t, func(c *assert.CollectT) {
 		g, _ := b.store.GenerationGet(*b.GenerationUUID)
 		assert.ErrorContains(c, g.EvalErr, "context deadline exceeded")
@@ -176,21 +214,20 @@ func TestBuilderTimeout(t *testing.T) {
 }
 
 func TestBuilderSuspend(t *testing.T) {
-	evalDone := make(chan struct{})
-	buildDone := make(chan struct{})
 	tmp := t.TempDir()
 	s, err := store.New(tmp+"/state.json", tmp+"/gcroots", 1, 1)
 	assert.Nil(t, err)
-	b := New(s, "", "", "", 1*time.Second, mkNixEvalMock(evalDone), 5*time.Second, mkNixBuildMock(buildDone))
+	eMock := NewExecutorMock(false)
+	b := New(s, eMock, "", "", "", 1*time.Second, 5*time.Second)
 	_ = b.Suspend()
 	assert.True(t, b.isSuspended)
 	_ = b.Eval(repository.RepositoryStatus{})
-	assert.True(t, b.IsEvaluating)
+	assert.True(t, b.isEvaluating.Load())
 
-	evalDone <- struct{}{}
+	eMock.evalDone <- struct{}{}
 	gUUID := <-b.EvaluationDone
 	assert.EventuallyWithT(t, func(c *assert.CollectT) {
-		assert.False(c, b.IsEvaluating)
+		assert.False(c, b.isEvaluating.Load())
 	}, 3*time.Second, 100*time.Millisecond)
 
 	g, _ := b.store.GenerationGet(gUUID)
@@ -199,6 +236,6 @@ func TestBuilderSuspend(t *testing.T) {
 	err = b.Resume()
 	assert.Nil(t, err)
 	assert.EventuallyWithT(t, func(c *assert.CollectT) {
-		assert.True(c, b.IsBuilding)
+		assert.True(c, b.isBuilding.Load())
 	}, 3*time.Second, 100*time.Millisecond)
 }

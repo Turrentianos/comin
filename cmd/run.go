@@ -70,6 +70,7 @@ var runCmd = &cobra.Command{
 		if ok, ld := store.LastDeployment(); ok {
 			mainCommitId = ld.Generation.MainCommitId
 			lastDeployment = &ld
+			metrics.SetDeploymentInfo(ld.Generation.SelectedCommitId, storePkg.StatusToString(ld.Status))
 		}
 		repository, err := repository.New(gitConfig, mainCommitId, metrics)
 		if err != nil {
@@ -82,7 +83,7 @@ var runCmd = &cobra.Command{
 		sched := scheduler.New()
 		sched.FetchRemotes(fetcher, cfg.Remotes)
 
-		builder := builder.New(store, gitConfig.Path, gitConfig.Dir, cfg.Hostname, 30*time.Minute, executor.Eval, 30*time.Minute, executor.Build)
+		builder := builder.New(store, executor, gitConfig.Path, gitConfig.Dir, cfg.Hostname, 30*time.Minute, 30*time.Minute)
 		deployer := deployer.New(executor.Deploy, lastDeployment, cfg.PostDeploymentCommand)
 
 		manager := manager.New(store, metrics, sched, fetcher, builder, deployer, machineId, executor)
